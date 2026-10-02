@@ -481,6 +481,12 @@ def _looks_degenerate(text: str) -> bool:
     if not stripped:
         return True
     if len(stripped) >= _DEGENERATE_MAX_CHARS:
+        # Long enough to pass the length check — but small models can still
+        # loop ("user user user ..."). Vocabulary collapse over 30+ tokens
+        # (< 10% unique) is a loop no real answer exhibits.
+        tokens = stripped.split()
+        if len(tokens) > 30 and len(set(tokens)) / len(tokens) < 0.1:
+            return True
         return False
     return any(marker in stripped for marker in _CITATION_MARKERS)
 
