@@ -1,0 +1,1 @@
+"""Repository layer — thin DB access wrappers used by services."""

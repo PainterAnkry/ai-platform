@@ -1,0 +1,54 @@
+# Core
+# NOTE: pins mirror the locally-verified dev environment (Windows, Python 3.14)
+# so the Docker build runs exactly what Phase 1-3 e2e suites ran against.
+# Older pins (fastapi 0.115 / pydantic 2.10 / pydantic-settings 2.6) drifted
+# from the dev env and broke the first real container build.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+pydantic==2.13.5
+# >= 2.7.0 required: app/core/config.py uses pydantic_settings.NoDecode.
+pydantic-settings==2.15.0
+
+# Database
+SQLAlchemy==2.1.1
+alembic==1.20.0
+psycopg2-binary==2.9.13
+python-dotenv==1.2.3
+# pgvector SQLAlchemy type for document_chunks.embedding (Phase 3 RAG).
+# No numpy requirement: plain float lists serialize fine.
+pgvector==0.5.0
+
+# Cache / Queue
+redis==5.3.1
+
+# Auth
+# NOTE: passlib is intentionally NOT used — passlib 1.7.4 is unmaintained and
+# breaks against bcrypt >= 4.1. app/core/security.py calls bcrypt directly.
+bcrypt==5.0.0
+PyJWT==2.15.0
+python-multipart==0.0.32
+# Required by pydantic's EmailStr in the auth schemas (installed globally on
+# the dev machine, which is why the missing pin only surfaced in Docker).
+email-validator==2.3.0
+
+# HTTP client (used by services that need to call external APIs)
+httpx==0.28.1
+
+# Logging / utilities
+python-json-logger==4.2.0
+
+# Dev / test
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx[http2]==0.28.1
+
+# Document parsing / async
+pypdf==5.1.0
+python-docx==1.1.2
+celery[redis]==5.4.0
+
+# Data-analysis agent (Phase 5 sandbox: Pandas stats + Matplotlib charts)
+pandas==3.0.5
+numpy==2.5.2
+matplotlib==3.11.1
+openpyxl==3.1.5

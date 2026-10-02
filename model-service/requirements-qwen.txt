@@ -1,0 +1,19 @@
+# Real-model backend for the model service (MODEL_SERVICE_LLM_BACKEND=qwen).
+#
+# The default model service is the dependency-free stub (requirements.txt); this
+# file adds the inference stack, so it is installed only where a real local
+# model is served:
+#
+#   python -m pip install -r requirements.txt -r requirements-qwen.txt
+#
+# Verified on Windows 11 / Python 3.14 with Qwen/Qwen3.5-0.8B served on CPU:
+# the model needs transformers >= 5.17 for the `qwen3_5` architecture (hybrid
+# linear attention), and torch's CPU wheel is what PyPI ships for Windows.
+# For GPU inference install the CUDA build of the matching torch version from
+# https://download.pytorch.org/whl/cu<version> (about 2.5 GB) instead of `torch`.
+
+torch==2.14.0
+transformers==5.17.0
+accelerate==1.15.0
+safetensors==0.8.0
+pillow==12.3.0

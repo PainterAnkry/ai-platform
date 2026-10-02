@@ -1,0 +1,61 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Node / Vue ----------
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.cache/
+coverage/
+
+# ---------- Env / Secrets ----------
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---------- IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Build / Uploads ----------
+uploads/
+*.tar
+*.tgz
+
+# ---------- Alembic (keep config & versions, ignore compiled) ----------
+# (intentionally empty — keep alembic.ini and versions/)
+
+# ---------- Docker ----------
+docker-compose.override.yml
+
+# ---------- Machine-local tooling artifacts ----------
+# DACL backup/report written when repairing DSH sandbox permissions on this
+# machine (docs/acl-reports/ also holds the rollback script for that repair).
+docs/acl-reports/*.db

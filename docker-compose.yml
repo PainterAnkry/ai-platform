@@ -1,0 +1,280 @@
+# =====================================================================
+# AI Platform — Phase 1-3 docker-compose
+# One-shot spin-up: frontend (nginx), backend (uvicorn), worker (celery),
+# postgres (+pgvector), redis.
+#
+# Usage:
+#   cp .env.example .env
+#   docker compose up -d --build
+#   open http://localhost:5173
+#
+# The `worker` service is what turns an upload into parsed, embedded chunks;
+# the backend only queues the task (or runs it inline when no broker is
+# reachable). PostgreSQL uses the pgvector-enabled image so migration 0003
+# can create the `vector` extension and the HNSW index.
+# =====================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-ai-platform}
+
+services:
+  postgres:
+    # pgvector-enabled PostgreSQL (same env/behaviour as postgres:16, plus
+    # the `vector` extension preinstalled).
+    image: pgvector/pgvector:pg16
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ai_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-redis
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ai_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-ai-platform}
+
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
+
+      # Phase 2: uploads + async ingestion. Empty CELERY_* values fall back to
+      # the REDIS_* settings above (broker db 1, result backend db 2).
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-}
+      CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-false}
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-26214400}
+
+      # Phase 3: RAG providers (mock defaults keep the stack runnable offline;
+      # point EMBEDDING_*/LLM_* at an OpenAI-compatible API for real models).
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      RERANKER_PROVIDER: ${RERANKER_PROVIDER:-lexical}
+      RERANKER_API_BASE: ${RERANKER_API_BASE:-}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # These three matter for a real local model: temperature 0.7 keeps a small
+      # model on the rails, the token cap bounds CPU latency, and a 60s default
+      # timeout would cut off a slow CPU answer mid-stream.
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-1024}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      RAG_VECTOR_TOP_K: ${RAG_VECTOR_TOP_K:-20}
+      RAG_FINAL_TOP_K: ${RAG_FINAL_TOP_K:-5}
+      # Phase 6: MCP (the server is mounted at /api/mcp on the backend itself;
+      # the worker keeps the same knobs for parity).
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-}
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - ai_net
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.workers.celery_app:celery_app", "worker",
+              "--loglevel=INFO", "--concurrency=2"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-ai-platform}
+
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+
+      # The worker must never run eagerly: it exists to execute the queued task.
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-}
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_SIZE_BYTES: ${MAX_UPLOAD_SIZE_BYTES:-26214400}
+
+      # Phase 3: the worker runs the embedding stage, so it needs the same
+      # provider configuration as the backend.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      RERANKER_PROVIDER: ${RERANKER_PROVIDER:-lexical}
+      RERANKER_API_BASE: ${RERANKER_API_BASE:-}
+      RERANKER_API_KEY: ${RERANKER_API_KEY:-}
+      RERANKER_MODEL: ${RERANKER_MODEL:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_BASE: ${LLM_API_BASE:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # These three matter for a real local model: temperature 0.7 keeps a small
+      # model on the rails, the token cap bounds CPU latency, and a 60s default
+      # timeout would cut off a slow CPU answer mid-stream.
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-1024}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      RAG_VECTOR_TOP_K: ${RAG_VECTOR_TOP_K:-20}
+      RAG_FINAL_TOP_K: ${RAG_FINAL_TOP_K:-5}
+      # Phase 6: MCP (the server is mounted at /api/mcp on the backend itself;
+      # the worker keeps the same knobs for parity).
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-}
+    volumes:
+      # Share the uploads directory with the backend so the worker can read
+      # files that the API wrote.
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ai_net
+
+  model-service:
+    # Phase 7: self-hosted OpenAI-compatible service (embedding / rerank / chat).
+    # Point EMBEDDING_API_BASE / RERANKER_API_BASE / LLM_API_BASE at
+    # http://model-service:9000/v1 (see .env.example) to route the whole AI
+    # chain through it without external API keys.
+    #
+    # The chat endpoint can serve a REAL local model instead of the stub: build
+    # with `--build-arg WITH_QWEN=true`, set MODEL_SERVICE_LLM_BACKEND=qwen plus
+    # QWEN_MODEL_DIR (host path of the checkpoint) in .env, and the weights are
+    # mounted read-only at /models/qwen. See README "本机真实模型".
+    build:
+      context: ./model-service
+      dockerfile: Dockerfile
+      args:
+        WITH_QWEN: ${WITH_QWEN:-false}
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-model-service
+    restart: unless-stopped
+    environment:
+      MODEL_SERVICE_DIM: ${EMBEDDING_DIM:-1024}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # stub (default) keeps the offline deterministic answers; qwen serves the
+      # local checkpoint mounted below.
+      MODEL_SERVICE_LLM_BACKEND: ${MODEL_SERVICE_LLM_BACKEND:-stub}
+      QWEN_MODEL_PATH: ${QWEN_MODEL_PATH:-/models/qwen}
+      QWEN_DEVICE: ${QWEN_DEVICE:-auto}
+      QWEN_DTYPE: ${QWEN_DTYPE:-auto}
+      QWEN_THREADS: ${QWEN_THREADS:-0}
+      QWEN_MAX_NEW_TOKENS: ${QWEN_MAX_NEW_TOKENS:-256}
+      QWEN_TEMPERATURE: ${QWEN_TEMPERATURE:-0.7}
+      QWEN_ENABLE_THINKING: ${QWEN_ENABLE_THINKING:-false}
+      QWEN_RETRY_DEGENERATE: ${QWEN_RETRY_DEGENERATE:-2}
+    volumes:
+      # Checkpoint directory for the real-model backend (defaults to this
+      # folder, which simply stays unused while the stub is selected).
+      - ${QWEN_MODEL_DIR:-./model-service}:/models/qwen:ro
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ai_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-ai-platform}-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    volumes:
+      - uploads_data:/app/uploads:ro
+    networks:
+      - ai_net
+
+networks:
+  ai_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
