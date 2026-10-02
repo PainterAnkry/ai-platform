@@ -80,8 +80,23 @@ async def run_agent_stream(
     """
     llm = get_llm_provider()
     specs = tool_specs(tool_names)
+    system_text = system_prompt or DEFAULT_AGENT_PERSONA
+    # Real LLMs can't guess file ids: surface the caller's uploaded data files
+    # in the system prompt so data_analysis gets a valid file_id. (The mock's
+    # intent matcher reads them from ``env`` instead.)
+    uploaded = (env or {}).get("data_files") or []
+    if uploaded:
+        listing = "\n".join(
+            f"- id={item.get('id')}：{item.get('filename')}"
+            f"（{len(item.get('columns') or [])} 列）"
+            for item in uploaded
+        )
+        system_text += (
+            "\n\n当前用户已上传以下数据文件，调用 data_analysis 工具时必须使用"
+            "对应记录里的 file_id（不要猜测其他编号）：\n" + listing
+        )
     messages: list[ChatMessage] = [
-        {"role": "system", "content": system_prompt or DEFAULT_AGENT_PERSONA},
+        {"role": "system", "content": system_text},
         *history,
         {"role": "user", "content": question},
     ]

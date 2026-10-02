@@ -107,11 +107,30 @@ def run_analysis(data_file: DataFile, question: str, db: Any) -> AnalysisOutcome
         data_file.column_names = [str(c) for c in df.columns]
         db.commit()
 
-    code = _analysis_code(df, question)
+    code, source = _analysis_code(df, question)
     _check_analysis_imports(code)
     namespace = _build_namespace(df, question)
 
     stdout, error, chart_url = _execute(code, namespace)
+
+    # Robustness net: small local models often emit broken pandas code. When
+    # model-generated code fails, degrade to the deterministic template so the
+    # user still gets a real analysis (and a note about the fallback).
+    if error and source == "llm":
+        logger.warning("LLM analysis code failed (%s); falling back to template", error[:120])
+        tpl_columns = [str(c) for c in df.columns]
+        tpl_numeric = [
+            c for c in tpl_columns if pd.api.types.is_numeric_dtype(df[c])
+        ]
+        tpl_code = _template_code(tpl_columns, tpl_numeric, question)
+        tpl_stdout, tpl_error, tpl_chart = _execute(tpl_code, _build_namespace(df, question))
+        if not tpl_error:
+            stdout = (
+                tpl_stdout.strip()[:MAX_SUMMARY_CHARS]
+                + "\n\n（模型生成的分析脚本执行失败，已自动回退到内置分析模板）"
+            )
+            error = None
+            chart_url = tpl_chart
 
     parts: list[str] = []
     if stdout.strip():
@@ -223,12 +242,17 @@ def _headline(question: str, error: Optional[str]) -> str:
     return question[:40] or "数据分析完成"
 
 
-def _analysis_code(df: pd.DataFrame, question: str) -> str:
-    """The pandas script to execute: LLM-generated in API mode, template in mock."""
+def _analysis_code(df: pd.DataFrame, question: str) -> tuple[str, str]:
+    """The pandas script to execute: LLM-generated in API mode, template in mock.
+
+    Returns ``(code, source)`` where source is ``"llm"`` or ``"template"`` —
+    the caller uses it to decide whether a failed run should fall back to the
+    deterministic template.
+    """
     if settings.LLM_PROVIDER == "openai":
         code = _llm_analysis_code(df, question)
         if code:
-            return code
+            return code, "llm"
         logger.warning("LLM analysis code generation failed; using template")
 
     columns = [str(c) for c in df.columns]
@@ -236,7 +260,7 @@ def _analysis_code(df: pd.DataFrame, question: str) -> str:
         c for c in columns
         if pd.api.types.is_numeric_dtype(df[c])
     ]
-    return _template_code(columns, numeric, question)
+    return _template_code(columns, numeric, question), "template"
 
 
 def _llm_analysis_code(df: pd.DataFrame, question: str) -> Optional[str]:

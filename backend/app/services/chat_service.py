@@ -275,6 +275,7 @@ class ChatService:
             db=self.db,
             user_id=user_id,
             knowledge_base_id=conv.knowledge_base_id,
+            data_files={row.id: row for row in data_files},
         )
         history = [
             {"role": msg.role, "content": msg.content}

@@ -165,7 +165,7 @@ def test_sandbox_rejects_forbidden_imports(
     sqlite_session.commit()
 
     monkeypatch.setattr(sandbox_mod, "_analysis_code", lambda df, q: (
-        "import os\nprint(os.listdir('.'))"
+        "import os\nprint(os.listdir('.'))", "llm"
     ))
     with pytest.raises(ToolError, match="不允许导入"):
         run_analysis(data_file, "任何问题", sqlite_session)
@@ -360,3 +360,44 @@ def test_data_file_upload_and_agent_chart_flow(
     assistant = detail["messages"][-1]
     assert assistant["tool_calls"] and assistant["tool_calls"]["steps"]
     assert "按月汇总" in assistant["content"]
+
+
+def test_executor_lists_data_files_in_system_prompt(sqlite_session: Session) -> None:
+    """Real LLMs cannot guess file ids — the prompt must carry the listing."""
+    from app.rag.llm import get_llm_provider
+
+    get_llm_provider.cache_clear()
+    user = _make_user(sqlite_session, "filelisting")
+    result = AgentRunResult()
+    seen: list[list[dict]] = []
+
+    # The executor binds get_llm_provider at import time — patch its own reference.
+    import app.agent.executor as executor_mod
+
+    original_fn = executor_mod.get_llm_provider
+    provider = get_llm_provider()
+
+    class RecordingMock(type(provider)):
+        def complete_with_tools(self, messages, tool_specs, env=None):
+            seen.append(list(messages))
+            return super().complete_with_tools(messages, tool_specs, env)
+
+    executor_mod.get_llm_provider = lambda: RecordingMock()  # type: ignore[assignment]
+    try:
+        _run(
+            run_agent_stream(
+                _ctx(sqlite_session, user),
+                question="分析 销售数据.xlsx 的月度趋势",
+                history=[],
+                env={"has_kb": False,
+                     "data_files": [{"id": 7, "filename": "销售数据.xlsx",
+                                     "columns": ["月份", "销售额"]}]},
+                result=result,
+            )
+        )
+    finally:
+        executor_mod.get_llm_provider = original_fn  # type: ignore[assignment]
+
+    system_texts = [m["content"] for msgs in seen for m in msgs if m["role"] == "system"]
+    assert any("id=7" in text and "销售数据.xlsx" in text for text in system_texts), \
+        "system prompt must list the uploaded data files with their ids"
